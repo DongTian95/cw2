@@ -92,9 +92,9 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
             #     assert (
             #         num_gpus_requested == 4
             #     ), "On HoreKA, you must request 4 GPUs (gres=gpu:4)"
-            assert (
-                not on_horeka_gpu
-            ), "You are on HoreKA and not using the GPU scheduler, don't! "
+            # assert (
+            #     not on_horeka_gpu
+            # ), "You are on HoreKA and not using the GPU scheduler, don't! "
 
         return use_distributed_gpu_scheduling
 
