@@ -87,10 +87,11 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
                 "hkn" in socket.gethostname()
                 and conf.slurm_config["partition"] == "accelerated"
             )
-            if on_horeka_gpu:
-                assert (
-                    num_gpus_requested == 4
-                ), "On HoreKA, you must request 4 GPUs (gres=gpu:4)"
+            # FIXME, DISABLE THIS TO ALLOW ONE GPU USAGE IN HOREKA
+            # if on_horeka_gpu:
+            #     assert (
+            #         num_gpus_requested == 4
+            #     ), "On HoreKA, you must request 4 GPUs (gres=gpu:4)"
             assert (
                 not on_horeka_gpu
             ), "You are on HoreKA and not using the GPU scheduler, don't! "
