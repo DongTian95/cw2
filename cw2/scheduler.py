@@ -88,7 +88,7 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
                 and conf.slurm_config["partition"] == "accelerated"
             )
             # FIXME, DISABLE THIS TO ALLOW ONE GPU USAGE IN HOREKA
-            # if on_horeka_gpu:
+            # if on_horeka_gpu: # test
             #     assert (
             #         num_gpus_requested == 4
             #     ), "On HoreKA, you must request 4 GPUs (gres=gpu:4)"
