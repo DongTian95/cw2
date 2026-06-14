@@ -393,7 +393,7 @@ class CpuDistributingLocalScheduler(AbstractScheduler):
 class LocalScheduler(AbstractScheduler):
     def run(self, overwrite: bool = False):
         for j in self.joblist:
-            # Avoid joblib/loky when only one task runs..
+            # Avoid joblib/loky when only one task runs.
             # This is important because experiments may create their own
             # multiprocessing workers, e.g. stable-baselines3 SubprocVecEnv.
             if j.n_parallel <= 1:
