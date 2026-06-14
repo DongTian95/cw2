@@ -40,9 +40,12 @@ class AbstractScheduler(abc.ABC):
 class GPUDistributingLocalScheduler(AbstractScheduler):
     def __init__(self, conf: cw_config.Config = None):
         super(GPUDistributingLocalScheduler, self).__init__(conf=conf)
-        self._total_num_gpus = int(
-            conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
-        )
+        if "num_gpus" in conf.slurm_config:
+            self._total_num_gpus = int(conf.slurm_config["num_gpus"])
+        else:
+            self._total_num_gpus = int(
+                conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
+            )
         self._gpus_per_rep = conf.slurm_config["gpus_per_rep"]
         self._queue_elements = int(self._total_num_gpus / self._gpus_per_rep)
 
@@ -61,41 +64,26 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
     def use_distributed_gpu_scheduling(conf: cw_config.Config) -> bool:
         if conf.slurm_config is None:
             return False
-        # Use if
-        # 1.) GPUs Requested
-        # 2.) Number of GPUs per rep specified
-        # 3.) Number of GPUs per rep != total number of gpus requested
-        gpus_requested = "gres" in conf.slurm_config.get("sbatch_args", "DUMMY_DEFAULT")
+
         gpus_per_rep_specified = "gpus_per_rep" in conf.slurm_config
 
-        if gpus_requested:
-            num_gpus_requested = int(
-                conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
-            )
-            # e.g. gres=gpu:4 or gres=gpu:full:4
+        if "num_gpus" in conf.slurm_config:
+            gpus_requested = True
+            num_gpus_requested = int(conf.slurm_config["num_gpus"])
         else:
-            num_gpus_requested = 0
+            gpus_requested = "gres" in conf.slurm_config.get("sbatch_args", {})
+            if gpus_requested:
+                num_gpus_requested = int(
+                    conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
+                )
+            else:
+                num_gpus_requested = 0
 
-        use_distributed_gpu_scheduling = (
-            gpus_requested
-            and gpus_per_rep_specified
-            and num_gpus_requested != conf.slurm_config["gpus_per_rep"]
+        return (
+                gpus_requested
+                and gpus_per_rep_specified
+                and num_gpus_requested != conf.slurm_config["gpus_per_rep"]
         )
-
-        if not use_distributed_gpu_scheduling:
-            on_horeka_gpu = (
-                "hkn" in socket.gethostname()
-                and conf.slurm_config["partition"] == "accelerated"
-            )
-            if on_horeka_gpu:
-                assert (
-                    num_gpus_requested == 4
-                ), "On HoreKA, you must request 4 GPUs (gres=gpu:4)"
-            assert (
-                not on_horeka_gpu
-            ), "You are on HoreKA and not using the GPU scheduler, don't! "
-
-        return use_distributed_gpu_scheduling
 
     @staticmethod
     def get_gpu_str(queue_idx: int, gpus_per_rep: float) -> str:
