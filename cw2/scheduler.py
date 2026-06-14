@@ -393,9 +393,18 @@ class CpuDistributingLocalScheduler(AbstractScheduler):
 class LocalScheduler(AbstractScheduler):
     def run(self, overwrite: bool = False):
         for j in self.joblist:
-            Parallel(n_jobs=j.n_parallel)(
-                delayed(self.execute_task)(j, c, overwrite) for c in j.tasks
-            )
+            # Avoid joblib/loky when only one task runs.
+            # This is important because experiments may create their own
+            # multiprocessing workers, e.g. stable-baselines3 SubprocVecEnv.
+            if j.n_parallel <= 1:
+                for c in j.tasks:
+                    self.execute_task(j, c, overwrite)
+            else:
+                # Use threads instead of loky processes to avoid nesting:
+                # loky process -> multiprocessing/SubprocVecEnv process
+                Parallel(n_jobs=j.n_parallel, backend="threading")(
+                    delayed(self.execute_task)(j, c, overwrite) for c in j.tasks
+                )
 
     def execute_task(self, j: job.Job, c: dict, overwrite: bool = False):
         try:
