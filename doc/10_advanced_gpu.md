@@ -14,11 +14,13 @@ The underlying multiprocessing is tricky business, behaviour is not always consi
 There can be weird side effects. 
 
 
-## 10.1. The ''gpus_per_rep'' Config Keyword
+## 10.1. The ''gpus_per_rep'' / ''reps_per_gpu'' Config Keywords
 
 The main new functionality to control GPU usage is the `gpus_per_rep` config keyword. Although it's not an actual SLURM key-word, it needs to be specified in the SLURM block of your config.
 It can be a float smaller than 1 or an integer lager or equal to 1. It does what the name suggests, it specifies how many GPUs are requested per repetition.
 For it to properly work, you need to set the `reps_per_job` and `reps_in_parallel` keys accordingly. 
+
+Alternatively, use `reps_per_gpu` to specify the same setup in the more natural direction. For example, `reps_per_gpu: 4` means four repetitions share one physical GPU and is equivalent to `gpus_per_rep: 0.25`. If both are set, `reps_per_gpu` takes precedence.
 
 **Caveat**: I have no idea what happens if different values for `reps_per_job` and `reps_in_parallel` are used throught your YAML. Just don't do it (or test it).
 
@@ -41,6 +43,22 @@ sbatch_args:
   gres: "gpu:1
 ``` 
 
+The equivalent, preferred form is:
+
+```yaml
+---
+# Slurm config
+name: "SLURM"
+partition: "gpu"
+job-name: "half_gpu_job"
+time: 20
+ntasks: 1
+cpus-per-task: 8
+reps_per_gpu: 2
+sbatch_args:
+  gres: "gpu:1"
+```
+
 To have both jobs run on the same GPU in parallel, set `reps_per_job` to 2 and `reps_in_parallel` to 2 (you can also
 set 'reps_per_job' to a multiple of 2):
 
@@ -57,7 +75,34 @@ Specify your experiment as usual, the total number of repetitions should be a mu
 It is your responsibility to take care of that! Check your code if it actually profits from this! (Don't expect a speed-up of 2x,
 more something like > 1.5x)
 
-### 10.1.2. Example 2: Using single GPUs when you can only request multiple GPUs 
+### 10.1.2. Example 2: Running four repetitions on one GPU
+
+Assume you want to run four independent seeds on the same physical GPU:
+
+```yaml
+---
+# Slurm config
+name: "SLURM"
+partition: "gpu"
+job-name: "four_seeds_one_gpu"
+time: 20
+ntasks: 1
+cpus-per-task: 32
+reps_per_gpu: 4
+sbatch_args:
+  gres: "gpu:1"
+
+---
+# Default
+name: DEFAULT
+repetitions: 4
+reps_per_job: 4
+reps_in_parallel: 4
+```
+
+All four repetitions will receive the same `CUDA_VISIBLE_DEVICES` value, while the HoreKA scheduler still assigns disjoint CPU affinity ranges to the individual repetitions.
+
+### 10.1.3. Example 3: Using single GPUs when you can only request multiple GPUs
 
 Assume you are on a HPC-System where the minimum number of GPUs you can request is 4 (e.g. HoreKa).
 

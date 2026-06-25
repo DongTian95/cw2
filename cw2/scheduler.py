@@ -4,6 +4,7 @@ import concurrent.futures
 import multiprocessing
 import socket
 import warnings
+import math
 from typing import List
 
 from joblib import Parallel, delayed
@@ -43,12 +44,44 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
         self._total_num_gpus = int(
             conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
         )
-        self._gpus_per_rep = conf.slurm_config["gpus_per_rep"]
-        self._queue_elements = int(self._total_num_gpus / self._gpus_per_rep)
+        self._reps_per_gpu = int(conf.slurm_config.get("reps_per_gpu", 1))
+        assert self._reps_per_gpu >= 1, "reps_per_gpu must be >= 1"
+
+        if self._reps_per_gpu > 1:
+            self._gpus_per_rep = 1.0 / self._reps_per_gpu
+            configured_gpus_per_rep = conf.slurm_config.get("gpus_per_rep", None)
+            if configured_gpus_per_rep is not None and not math.isclose(
+                float(configured_gpus_per_rep),
+                self._gpus_per_rep,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                warnings.warn(
+                    "Both reps_per_gpu and gpus_per_rep are set. "
+                    "Using reps_per_gpu={} (equivalent gpus_per_rep={}).".format(
+                        self._reps_per_gpu,
+                        self._gpus_per_rep,
+                    )
+                )
+        else:
+            self._gpus_per_rep = float(conf.slurm_config["gpus_per_rep"])
+
+        assert self._gpus_per_rep > 0, "gpus_per_rep must be > 0"
+        queue_elements = self._total_num_gpus / self._gpus_per_rep
+        assert math.isclose(
+            queue_elements,
+            round(queue_elements),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ), "gpus_per_rep / reps_per_gpu must divide the requested GPUs evenly"
+        self._queue_elements = int(round(queue_elements))
 
         print(
-            "GPUDistributingLocalScheduler: {} GPUs available, {} GPUs per rep, {} queue elements".format(
-                self._total_num_gpus, self._gpus_per_rep, self._queue_elements
+            "GPUDistributingLocalScheduler: {} GPUs available, {} GPUs per rep, {} reps per GPU, {} queue elements".format(
+                self._total_num_gpus,
+                self._gpus_per_rep,
+                self._reps_per_gpu,
+                self._queue_elements,
             )
         )
 
@@ -67,6 +100,7 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
         # 3.) Number of GPUs per rep != total number of gpus requested
         gpus_requested = "gres" in conf.slurm_config.get("sbatch_args", "DUMMY_DEFAULT")
         gpus_per_rep_specified = "gpus_per_rep" in conf.slurm_config
+        reps_per_gpu_specified = "reps_per_gpu" in conf.slurm_config
 
         if gpus_requested:
             num_gpus_requested = int(
@@ -78,8 +112,16 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
 
         use_distributed_gpu_scheduling = (
             gpus_requested
-            and gpus_per_rep_specified
-            and num_gpus_requested != conf.slurm_config["gpus_per_rep"]
+            and (
+                (
+                    gpus_per_rep_specified
+                    and num_gpus_requested != conf.slurm_config["gpus_per_rep"]
+                )
+                or (
+                    reps_per_gpu_specified
+                    and int(conf.slurm_config["reps_per_gpu"]) > 1
+                )
+            )
         )
 
         if not use_distributed_gpu_scheduling:
@@ -109,7 +151,7 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
                 *[queue_idx * gpus_per_rep + i for i in range(gpus_per_rep)]
             )[:-1]
         else:
-            return str(int(queue_idx * gpus_per_rep) + 0.01)
+            return str(int(queue_idx * gpus_per_rep))
 
 
 class MPGPUDistributingLocalScheduler(GPUDistributingLocalScheduler):
