@@ -54,6 +54,8 @@ class SlurmConfig:
         # SET DEFAULT VALUES
         sc.setdefault(SKEYS.SLURM_LOG, os.path.join(exp_output_path, "slurmlog"))
         sc.setdefault(SKEYS.SLURM_OUT, os.path.join(exp_output_path, "sbatch.sh"))
+        sc[SKEYS.SLURM_LOG] = os.path.abspath(sc[SKEYS.SLURM_LOG])
+        sc[SKEYS.SLURM_OUT] = os.path.abspath(sc[SKEYS.SLURM_OUT])
         sc.setdefault(SKEYS.ACCOUNT, "")
 
         # COMPLEX CONVERSIONS
@@ -322,10 +324,27 @@ class SlurmDirectoryManager:
         Returns:
             str: experiment execution directory
         """
-        if self.m == self.MODE_COPY or self.m == self.MODE_MULTI:
-            return self.get_exp_dst()
+        if self.m == self.MODE_COPY:
+            return self._map_path_into_copy(os.path.abspath(self.get_exp_dst()))
+
+        if self.m == self.MODE_MULTI:
+            return self._map_path_into_copy(
+                os.path.join(os.path.abspath(self.get_exp_dst()), "$SLURM_ARRAY_TASK_ID")
+            )
 
         return self.get_exp_src()
+
+    def _map_path_into_copy(self, copied_root: str) -> str:
+        """Map the original working directory into the copied source tree."""
+        src = os.path.abspath(self.get_exp_src())
+        cwd = os.path.abspath(os.getcwd())
+        if not util.check_subdir(src, cwd):
+            return copied_root
+
+        rel_cwd = os.path.relpath(cwd, src)
+        if rel_cwd == ".":
+            return copied_root
+        return os.path.join(copied_root, rel_cwd)
 
     def get_py_path(self) -> str:
         """computes a modified python path, depending on the experiment_copy procedure
