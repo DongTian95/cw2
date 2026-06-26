@@ -41,9 +41,7 @@ class AbstractScheduler(abc.ABC):
 class GPUDistributingLocalScheduler(AbstractScheduler):
     def __init__(self, conf: cw_config.Config = None):
         super(GPUDistributingLocalScheduler, self).__init__(conf=conf)
-        self._total_num_gpus = int(
-            conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
-        )
+        self._total_num_gpus = self.get_num_requested_gpus(conf)
         self._reps_per_gpu = int(conf.slurm_config.get("reps_per_gpu", 1))
         assert self._reps_per_gpu >= 1, "reps_per_gpu must be >= 1"
 
@@ -91,6 +89,13 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
             ), "gpus_per_rep must be integer"
 
     @staticmethod
+    def get_num_requested_gpus(conf: cw_config.Config) -> int:
+        sbatch_args = conf.slurm_config.get("sbatch_args", {})
+        if isinstance(sbatch_args, dict) and "gres" in sbatch_args:
+            return int(str(sbatch_args["gres"]).rsplit(":", 1)[1])
+        return int(conf.slurm_config.get("num_gpus", 0))
+
+    @staticmethod
     def use_distributed_gpu_scheduling(conf: cw_config.Config) -> bool:
         if conf.slurm_config is None:
             return False
@@ -98,17 +103,10 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
         # 1.) GPUs Requested
         # 2.) Number of GPUs per rep specified
         # 3.) Number of GPUs per rep != total number of gpus requested
-        gpus_requested = "gres" in conf.slurm_config.get("sbatch_args", "DUMMY_DEFAULT")
+        num_gpus_requested = GPUDistributingLocalScheduler.get_num_requested_gpus(conf)
+        gpus_requested = num_gpus_requested > 0
         gpus_per_rep_specified = "gpus_per_rep" in conf.slurm_config
         reps_per_gpu_specified = "reps_per_gpu" in conf.slurm_config
-
-        if gpus_requested:
-            num_gpus_requested = int(
-                conf.slurm_config["sbatch_args"]["gres"].rsplit(":", 1)[1]
-            )
-            # e.g. gres=gpu:4 or gres=gpu:full:4
-        else:
-            num_gpus_requested = 0
 
         use_distributed_gpu_scheduling = (
             gpus_requested
