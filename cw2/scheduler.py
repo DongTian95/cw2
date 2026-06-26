@@ -206,14 +206,17 @@ class HOREKAAffinityGPUDistributingLocalScheduler(GPUDistributingLocalScheduler)
         super(HOREKAAffinityGPUDistributingLocalScheduler, self).__init__(conf=conf)
 
         total_cpus = conf.slurm_config["cpus-per-task"] * conf.slurm_config["ntasks"]
-        self._cpus_per_rep = total_cpus // self._queue_elements
+        self._allowed_cpus = sorted(os.sched_getaffinity(0))
+        usable_cpu_count = min(total_cpus, len(self._allowed_cpus))
+        self._usable_cpus = self._allowed_cpus[:usable_cpu_count]
+        self._cpus_per_rep = usable_cpu_count // self._queue_elements
 
         assert (
             self._cpus_per_rep > 0
         ), "Not enough CPUs for the number of GPUs requested"
 
     def run(self, overwrite: bool = False):
-        print("Seeing CPUs:", os.sched_getaffinity(0))
+        print("Seeing CPUs:", os.sched_getaffinity(0), flush=True)
         num_parallel = self.joblist[0].n_parallel
         for j in self.joblist:
             assert (
@@ -233,17 +236,23 @@ class HOREKAAffinityGPUDistributingLocalScheduler(GPUDistributingLocalScheduler)
             for i in range(self._queue_elements):
                 gpu_queue.put(i)
 
+            futures = []
             for j in self.joblist:
                 for c in j.tasks:
-                    pool.submit(
-                        HOREKAAffinityGPUDistributingLocalScheduler._execute_task,
-                        j,
-                        c,
-                        gpu_queue,
-                        self._gpus_per_rep,
-                        self._cpus_per_rep,
-                        overwrite,
+                    futures.append(
+                        pool.submit(
+                            HOREKAAffinityGPUDistributingLocalScheduler._execute_task,
+                            j,
+                            c,
+                            gpu_queue,
+                            self._gpus_per_rep,
+                            self._usable_cpus,
+                            self._cpus_per_rep,
+                            overwrite,
+                        )
                     )
+            for future in futures:
+                future.result()
 
     @staticmethod
     def _execute_task(
@@ -251,16 +260,19 @@ class HOREKAAffinityGPUDistributingLocalScheduler(GPUDistributingLocalScheduler)
         c: dict,
         q: multiprocessing.Queue,
         gpus_per_rep: int,
+        usable_cpus: list,
         cpus_per_rep: int,
         overwrite: bool = False,
     ):
-        print("Seeing CPUs:", os.sched_getaffinity(0))
+        print("Seeing CPUs:", os.sched_getaffinity(0), flush=True)
         queue_idx = q.get()
         gpu_str = HOREKAAffinityGPUDistributingLocalScheduler.get_gpu_str(
             queue_idx, gpus_per_rep
         )
-        cpus = set(range(queue_idx * cpus_per_rep, (queue_idx + 1) * cpus_per_rep))
-        print("Job {}: Using GPUs: {} and CPUs: {}".format(queue_idx, gpu_str, cpus))
+        cpu_start = queue_idx * cpus_per_rep
+        cpu_end = (queue_idx + 1) * cpus_per_rep
+        cpus = set(usable_cpus[cpu_start:cpu_end])
+        print("Job {}: Using GPUs: {} and CPUs: {}".format(queue_idx, gpu_str, cpus), flush=True)
         try:
             os.sched_setaffinity(0, cpus)
             c[KEYS.i_CPU_CORES] = cpus
