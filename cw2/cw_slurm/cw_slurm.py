@@ -123,6 +123,10 @@ class SlurmDirectoryManager:
     MODE_MULTI = "MULTI"
     MODE_NOCOPY = "NOCOPY"
     MODE_ZIP = "ZIP"
+    RUNTIME_COPY_EXCLUDES = (
+        ".idea/",
+        ".vscode/",
+    )
 
     def __init__(self, sc: SlurmConfig, conf: cw_config.Config) -> None:
         self.slurm_config = sc
@@ -189,7 +193,7 @@ class SlurmDirectoryManager:
         if cw_options.get("skipsizecheck"):
             return
 
-        dirsize = util.get_size(src)
+        dirsize = self._copy_manifest_size(src)
         if dirsize > 200.0:
             cw_logging.getLogger().warning(
                 "SourceDir {} is greater than 200MByte".format(src)
@@ -229,6 +233,105 @@ class SlurmDirectoryManager:
         else:
             exp_output_path = self.conf.exp_configs[0][CKEYS.i_BASIC_PATH]
             return os.path.join(exp_output_path, "code")
+
+    @staticmethod
+    def _git_root(src: str):
+        try:
+            return subprocess.check_output(
+                ["git", "-C", src, "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+    def _copy_manifest(self, src):
+        src = os.path.abspath(src)
+        if not os.path.isdir(src):
+            return None
+
+        git_root = self._git_root(src)
+        if git_root is None:
+            return None
+
+        try:
+            raw_paths = subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    git_root,
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--modified",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+        rel_src = os.path.relpath(src, git_root)
+        rel_src_posix = "" if rel_src == "." else rel_src.replace(os.sep, "/").rstrip("/") + "/"
+        manifest = set()
+        for raw_path in raw_paths.split(b"\0"):
+            if not raw_path:
+                continue
+            rel_git_path = raw_path.decode(sys.getfilesystemencoding(), errors="surrogateescape")
+            if rel_src_posix:
+                if not rel_git_path.startswith(rel_src_posix):
+                    continue
+                rel_path = rel_git_path[len(rel_src_posix):]
+            else:
+                rel_path = rel_git_path
+
+            if self._runtime_copy_excluded(rel_path):
+                continue
+
+            src_path = os.path.join(src, *rel_path.split("/"))
+            if os.path.isfile(src_path) or os.path.islink(src_path):
+                manifest.add(rel_path)
+
+        return sorted(manifest)
+
+    def _runtime_copy_excluded(self, rel_path):
+        rel_path = rel_path.replace(os.sep, "/")
+        return any(
+            rel_path == pattern.rstrip("/") or rel_path.startswith(pattern)
+            for pattern in self.RUNTIME_COPY_EXCLUDES
+        )
+
+    def _copy_manifest_size(self, src):
+        manifest = self._copy_manifest(src)
+        if manifest is None:
+            return util.get_size(src)
+
+        total_size = 0
+        src = os.path.abspath(src)
+        for rel_path in manifest:
+            src_path = os.path.join(src, *rel_path.split("/"))
+            total_size += os.path.getsize(src_path)
+        return total_size / 1000000.0
+
+    def _copy_manifest_files(self, src, dst, manifest):
+        src = os.path.abspath(src)
+        for rel_path in manifest:
+            s = os.path.join(src, *rel_path.split("/"))
+            d = os.path.join(dst, *rel_path.split("/"))
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            shutil.copy2(s, d)
+
+    @staticmethod
+    def _copy_all_files(src, dst):
+        ign = shutil.ignore_patterns("*.pyc", "tmp*", ".git*", ".idea", ".vscode")
+        for item in os.listdir(src):
+            s = os.path.join(src, item)
+            d = os.path.join(dst, item)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, ignore=ign)
+            else:
+                shutil.copy2(s, d)
 
     def zip_exp(self):
         """procedure for creating a zip backup"""
@@ -287,15 +390,13 @@ class SlurmDirectoryManager:
                 "{} already exists. Please define a different 'experiment_copy_dst', use '-o' to overwrite or '--nocodecopy' to skip."
             )
 
-        # Copy files
-        ign = shutil.ignore_patterns("*.pyc", "tmp*", ".git*")
-        for item in os.listdir(src):
-            s = os.path.join(src, item)
-            d = os.path.join(dst, item)
-            if os.path.isdir(s):
-                shutil.copytree(s, d, ignore=ign)
-            else:
-                shutil.copy2(s, d)
+        # Copy the same file set Git would sync: tracked files plus untracked
+        # files that are not ignored by .gitignore/.git/info/exclude.
+        manifest = self._copy_manifest(src)
+        if manifest is None:
+            self._copy_all_files(src, dst)
+        else:
+            self._copy_manifest_files(src, dst, manifest)
 
     def move_files(self, num_jobs: int):
         """moves exp files according to detected copy mode
