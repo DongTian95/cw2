@@ -147,20 +147,35 @@ class WandBLogger(cw_logging.AbstractLogger):
 
     def process(self, data: dict) -> None:
         if self.run is not None:
+            final_iteration = (
+                self.cw2_config.get("iterations") is not None
+                and data.get("iter") is not None
+                and data["iter"] >= self.cw2_config["iterations"] - 1
+            )
+
             # Skip logging if interval is defined but not satisfied
             log_interval = self.config.get("log_interval", None)
-            if log_interval is not None and data["iter"] % log_interval != 0:
+            if (
+                log_interval is not None
+                and not final_iteration
+                and data["iter"] % log_interval != 0
+            ):
                 return
+
+            step = (
+                self.cw2_config["iterations"]
+                if final_iteration
+                else data.get("iter", None)
+            )
 
             if "histogram" in self.config:
                 for el in self.config["histogram"]:
                     if el in data:
                         self.run.log(
                             {el: wandb.Histogram(np_histogram=data[el])},
-                            step=data["iter"],
+                            step=step,
                         )
             filtered_data = self.filter(data)
-            step = data.get("iter", None)
             self.run.log(filtered_data, step=step)
 
     def finalize(self) -> None:
