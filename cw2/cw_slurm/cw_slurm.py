@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -126,6 +128,16 @@ class SlurmDirectoryManager:
     RUNTIME_COPY_EXCLUDES = (
         ".idea/",
         ".vscode/",
+        ".cw2_git_repos.json",
+    )
+    GIT_SNAPSHOT_FILE = ".cw2_git_repos.json"
+    GIT_REPO_MARKERS = (
+        ("mprl", "mprl"),
+        ("mp_pytorch", "mp_pytorch"),
+        ("fancy_gym", "fancy_gym"),
+        ("metaworld", "metaworld"),
+        ("cw2", "cw2"),
+        ("git_repos_tracker", "git_repos_tracker"),
     )
 
     def __init__(self, sc: SlurmConfig, conf: cw_config.Config) -> None:
@@ -244,6 +256,140 @@ class SlurmDirectoryManager:
             ).strip()
         except (subprocess.CalledProcessError, FileNotFoundError):
             return None
+
+    @staticmethod
+    def _git_output(git_root: str, *args: str):
+        try:
+            return subprocess.check_output(
+                ["git", "-C", git_root, *args],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
+
+    @classmethod
+    def _repo_key_from_root(cls, git_root: str):
+        base_name = os.path.basename(os.path.abspath(git_root))
+        if base_name == "dt_rl" and os.path.isdir(os.path.join(git_root, "mprl")):
+            return "mprl"
+
+        for repo_key, package_dir in cls.GIT_REPO_MARKERS:
+            if base_name == package_dir or os.path.isdir(os.path.join(git_root, package_dir)):
+                return repo_key
+
+        return base_name
+
+    def _candidate_git_roots(self, src: str):
+        candidates = [
+            src,
+            os.getcwd(),
+            os.path.dirname(__file__),
+        ]
+        candidates.extend([path for path in sys.path if path])
+        candidates.extend(
+            path for path in os.environ.get("PYTHONPATH", "").split(os.pathsep) if path
+        )
+
+        src_git_root = self._git_root(src)
+        if src_git_root is not None:
+            for deps_root in (
+                os.path.join(src_git_root, ".deps"),
+                os.path.join(os.path.dirname(src_git_root), ".deps"),
+            ):
+                if not os.path.isdir(deps_root):
+                    continue
+                for item in os.listdir(deps_root):
+                    candidates.append(os.path.join(deps_root, item))
+
+        git_roots = []
+        seen = set()
+        for path in candidates:
+            if not path or not os.path.exists(path):
+                continue
+            git_root = self._git_root(path)
+            if git_root is None:
+                continue
+            git_root = os.path.abspath(git_root)
+            if git_root in seen:
+                continue
+            seen.add(git_root)
+            git_roots.append(git_root)
+
+        return git_roots
+
+    def _repo_snapshot(self, git_root: str):
+        commit = self._git_output(git_root, "rev-parse", "HEAD")
+        if commit is None:
+            return None
+
+        branch = self._git_output(git_root, "rev-parse", "--abbrev-ref", "HEAD")
+        if branch == "HEAD":
+            branch = None
+        status = self._git_output(git_root, "status", "--porcelain") or ""
+        status_lines = [line for line in status.splitlines() if line]
+
+        return {
+            "path": git_root,
+            "branch": branch,
+            "commit": commit,
+            "clean": len(status_lines) == 0,
+            "num_changed": len(status_lines),
+            "num_untracked": sum(line.startswith("??") for line in status_lines),
+        }
+
+    @staticmethod
+    def _manifest_sha256(src: str, manifest):
+        if manifest is None:
+            return None
+
+        src = os.path.abspath(src)
+        digest = hashlib.sha256()
+        for rel_path in manifest:
+            path = os.path.join(src, *rel_path.split("/"))
+            digest.update(rel_path.encode("utf-8", errors="surrogateescape"))
+            digest.update(b"\0")
+            if os.path.islink(path):
+                digest.update(b"symlink\0")
+                digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+                digest.update(b"\0")
+                continue
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            digest.update(b"\0")
+
+        return digest.hexdigest()
+
+    def _write_git_snapshot(self, src: str, dst: str, manifest):
+        repos = {}
+        for git_root in self._candidate_git_roots(src):
+            repo_info = self._repo_snapshot(git_root)
+            if repo_info is None:
+                continue
+            repos[self._repo_key_from_root(git_root)] = repo_info
+
+        if not repos:
+            return
+
+        snapshot = {
+            "copied_at": datetime.datetime.now().isoformat(),
+            "source_path": os.path.abspath(src),
+            "copy_path": os.path.abspath(dst),
+            "copy_manifest_sha256": self._manifest_sha256(dst, manifest),
+            "copy_manifest_num_files": len(manifest) if manifest is not None else None,
+            "git_repos": {
+                repo_key: repo_info["commit"]
+                for repo_key, repo_info in repos.items()
+            },
+            "git_snapshot": repos,
+        }
+
+        with open(os.path.join(dst, self.GIT_SNAPSHOT_FILE), "w") as f:
+            json.dump(snapshot, f, indent=2, sort_keys=True)
 
     def _copy_manifest(self, src):
         src = os.path.abspath(src)
@@ -397,6 +543,7 @@ class SlurmDirectoryManager:
             self._copy_all_files(src, dst)
         else:
             self._copy_manifest_files(src, dst, manifest)
+        self._write_git_snapshot(src, dst, manifest)
 
     def move_files(self, num_jobs: int):
         """moves exp files according to detected copy mode
