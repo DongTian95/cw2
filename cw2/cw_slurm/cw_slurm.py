@@ -614,9 +614,10 @@ class SlurmDirectoryManager:
         new_path = [
             x.replace(os.path.abspath(src), os.path.abspath(dst)) for x in pypath
         ]
-        # return "export PYTHONPATH=" + ":".join(new_path)
-        # Maybe this is better?
-        return "export PYTHONPATH=$PYTHONPATH:" + ":".join(new_path)
+        copied_root = os.path.abspath(dst)
+        if copied_root not in new_path:
+            new_path.insert(0, copied_root)
+        return "export PYTHONPATH=" + ":".join(new_path) + ":$PYTHONPATH"
 
 
 def run_slurm(conf: cw_config.Config, num_jobs: int) -> None:
