@@ -45,7 +45,7 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
         self._reps_per_gpu = int(conf.slurm_config.get("reps_per_gpu", 1))
         assert self._reps_per_gpu >= 1, "reps_per_gpu must be >= 1"
 
-        if self._reps_per_gpu > 1:
+        if "reps_per_gpu" in conf.slurm_config:
             self._gpus_per_rep = 1.0 / self._reps_per_gpu
             configured_gpus_per_rep = conf.slurm_config.get("gpus_per_rep", None)
             if configured_gpus_per_rep is not None and not math.isclose(
