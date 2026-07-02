@@ -99,10 +99,8 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
     def use_distributed_gpu_scheduling(conf: cw_config.Config) -> bool:
         if conf.slurm_config is None:
             return False
-        # Use if
-        # 1.) GPUs Requested
-        # 2.) Number of GPUs per rep specified
-        # 3.) Number of GPUs per rep != total number of gpus requested
+        # Use if GPU allocation is explicitly controlled by either the legacy
+        # gpus_per_rep setting or the newer reps_per_gpu setting.
         num_gpus_requested = GPUDistributingLocalScheduler.get_num_requested_gpus(conf)
         gpus_requested = num_gpus_requested > 0
         gpus_per_rep_specified = "gpus_per_rep" in conf.slurm_config
@@ -115,10 +113,7 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
                     gpus_per_rep_specified
                     and num_gpus_requested != conf.slurm_config["gpus_per_rep"]
                 )
-                or (
-                    reps_per_gpu_specified
-                    and int(conf.slurm_config["reps_per_gpu"]) > 1
-                )
+                or reps_per_gpu_specified
             )
         )
 
