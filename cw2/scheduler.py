@@ -2,6 +2,7 @@ import abc
 import os
 import concurrent.futures
 import multiprocessing
+import signal
 import socket
 import warnings
 import math
@@ -146,6 +147,61 @@ class GPUDistributingLocalScheduler(AbstractScheduler):
         else:
             return str(int(queue_idx * gpus_per_rep))
 
+    @staticmethod
+    def _pool_worker_pids(pool) -> list:
+        if pool is None:
+            return []
+        processes = getattr(pool, "_processes", None)
+        if isinstance(processes, dict):
+            return [
+                pid for pid, process in processes.items()
+                if process is not None and process.is_alive()
+            ]
+        workers = getattr(pool, "_pool", None)
+        if workers is not None:
+            return [
+                process.pid for process in workers
+                if process is not None
+                and process.pid is not None
+                and process.is_alive()
+            ]
+        return []
+
+    @staticmethod
+    def _install_worker_signal_forwarding(get_pool):
+        previous_handlers = {}
+
+        def _forward_signal(signum, _frame):
+            worker_pids = GPUDistributingLocalScheduler._pool_worker_pids(
+                get_pool()
+            )
+            print(
+                f"[scheduler] Received signal {signum}; "
+                f"forwarding to worker processes {worker_pids}",
+                flush=True,
+            )
+            for pid in worker_pids:
+                try:
+                    os.kill(pid, signum)
+                except ProcessLookupError:
+                    pass
+
+        for sig in (signal.SIGTERM, signal.SIGUSR1):
+            try:
+                previous_handlers[sig] = signal.getsignal(sig)
+                signal.signal(sig, _forward_signal)
+            except (AttributeError, ValueError):
+                pass
+        return previous_handlers
+
+    @staticmethod
+    def _restore_signal_handlers(previous_handlers):
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except (AttributeError, ValueError):
+                pass
+
 
 class MPGPUDistributingLocalScheduler(GPUDistributingLocalScheduler):
     def run(self, overwrite: bool = False):
@@ -159,21 +215,29 @@ class MPGPUDistributingLocalScheduler(GPUDistributingLocalScheduler):
                 "parallel. Fix for optimal resource usage!!"
             )
 
-        with multiprocessing.Pool(processes=num_parallel) as pool:
-            # setup gpu resource queue
-            m = multiprocessing.Manager()
-            gpu_queue = m.Queue(maxsize=self._queue_elements)
-            for i in range(self._queue_elements):
-                gpu_queue.put(i)
+        active_pool = None
+        previous_handlers = self._install_worker_signal_forwarding(
+            lambda: active_pool
+        )
+        try:
+            with multiprocessing.Pool(processes=num_parallel) as pool:
+                active_pool = pool
+                # setup gpu resource queue
+                m = multiprocessing.Manager()
+                gpu_queue = m.Queue(maxsize=self._queue_elements)
+                for i in range(self._queue_elements):
+                    gpu_queue.put(i)
 
-            for j in self.joblist:
-                for c in j.tasks:
-                    pool.apply_async(
-                        MPGPUDistributingLocalScheduler._execute_task,
-                        (j, c, gpu_queue, self._gpus_per_rep, overwrite),
-                    )
-            pool.close()
-            pool.join()
+                for j in self.joblist:
+                    for c in j.tasks:
+                        pool.apply_async(
+                            MPGPUDistributingLocalScheduler._execute_task,
+                            (j, c, gpu_queue, self._gpus_per_rep, overwrite),
+                        )
+                pool.close()
+                pool.join()
+        finally:
+            self._restore_signal_handlers(previous_handlers)
 
     @staticmethod
     def _execute_task(
@@ -220,32 +284,40 @@ class HOREKAAffinityGPUDistributingLocalScheduler(GPUDistributingLocalScheduler)
                 "parallel. Fix for optimal resource usage!!"
             )
 
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=num_parallel,
-        ) as pool:
-            # setup gpu resource queue
-            m = multiprocessing.Manager()
-            gpu_queue = m.Queue(maxsize=self._queue_elements)
-            for i in range(self._queue_elements):
-                gpu_queue.put(i)
+        active_pool = None
+        previous_handlers = self._install_worker_signal_forwarding(
+            lambda: active_pool
+        )
+        try:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=num_parallel,
+            ) as pool:
+                active_pool = pool
+                # setup gpu resource queue
+                m = multiprocessing.Manager()
+                gpu_queue = m.Queue(maxsize=self._queue_elements)
+                for i in range(self._queue_elements):
+                    gpu_queue.put(i)
 
-            futures = []
-            for j in self.joblist:
-                for c in j.tasks:
-                    futures.append(
-                        pool.submit(
-                            HOREKAAffinityGPUDistributingLocalScheduler._execute_task,
-                            j,
-                            c,
-                            gpu_queue,
-                            self._gpus_per_rep,
-                            self._usable_cpus,
-                            self._cpus_per_rep,
-                            overwrite,
+                futures = []
+                for j in self.joblist:
+                    for c in j.tasks:
+                        futures.append(
+                            pool.submit(
+                                HOREKAAffinityGPUDistributingLocalScheduler._execute_task,
+                                j,
+                                c,
+                                gpu_queue,
+                                self._gpus_per_rep,
+                                self._usable_cpus,
+                                self._cpus_per_rep,
+                                overwrite,
+                            )
                         )
-                    )
-            for future in futures:
-                future.result()
+                for future in futures:
+                    future.result()
+        finally:
+            self._restore_signal_handlers(previous_handlers)
 
     @staticmethod
     def _execute_task(
