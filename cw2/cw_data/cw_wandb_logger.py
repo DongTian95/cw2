@@ -1,3 +1,4 @@
+import json
 import os
 import warnings
 from random import random
@@ -129,6 +130,7 @@ class WandBLogger(cw_logging.AbstractLogger):
                     if self.cw2_config["wandb"].get("enabled", True)
                     else "disabled",
                 )
+                self.write_wandb_metadata()
                 return  # if starting the run is successful, exit the loop (and in this case the function)
             except Exception as e:
                 last_error = e
@@ -181,8 +183,66 @@ class WandBLogger(cw_logging.AbstractLogger):
 
     def finalize(self) -> None:
         if self.run is not None:
+            self.write_wandb_metadata()
             self.log_model()
             self.run.finish()
+
+    def _git_metadata_payload(self):
+        git_repos = self.cw2_config.get("git_repos")
+        git_snapshot = self.cw2_config.get("git_snapshot")
+
+        payload = {}
+        if isinstance(git_repos, dict):
+            payload["git_repos"] = git_repos
+            for repo_key, commit in git_repos.items():
+                payload[f"git_commit_{repo_key}"] = commit
+
+        if isinstance(git_snapshot, dict):
+            payload["git_snapshot"] = git_snapshot
+            for key in (
+                "copy_manifest_sha256",
+                "copy_manifest_num_files",
+                "source_path",
+                "copy_path",
+                "copied_at",
+            ):
+                if key in git_snapshot:
+                    payload[key] = git_snapshot[key]
+
+            snapshot_repos = git_snapshot.get("git_repos")
+            if isinstance(snapshot_repos, dict):
+                payload.setdefault("git_repos", snapshot_repos)
+                for repo_key, commit in snapshot_repos.items():
+                    payload.setdefault(f"git_commit_{repo_key}", commit)
+
+        return payload
+
+    def _wandb_metadata_path(self):
+        if self.run is None or getattr(self.run, "dir", None) is None:
+            return None
+        return os.path.join(self.run.dir, "wandb-metadata.json")
+
+    def write_wandb_metadata(self):
+        payload = self._git_metadata_payload()
+        if not payload:
+            return
+
+        metadata_path = self._wandb_metadata_path()
+        if metadata_path is None:
+            return
+
+        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+        metadata = {}
+        if os.path.isfile(metadata_path):
+            try:
+                with open(metadata_path, "r") as f:
+                    metadata = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+
+        metadata.update(payload)
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2, sort_keys=True)
 
     def load(self):
         pass
