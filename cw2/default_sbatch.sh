@@ -27,6 +27,30 @@
 # Additional Instructions from CONFIG.yml
 %%sh_lines%%
 
-python3 %%python_script%% %%path_to_yaml_config%% -j $SLURM_ARRAY_TASK_ID %%cw_args%%
+CW2_PYTHON_PID=""
+
+forward_signal_to_python() {
+    signal_name="$1"
+    if [ -n "$CW2_PYTHON_PID" ] && kill -0 "$CW2_PYTHON_PID" 2>/dev/null; then
+        echo "[slurm] Forwarding ${signal_name} to python process ${CW2_PYTHON_PID}"
+        kill -s "$signal_name" "$CW2_PYTHON_PID" 2>/dev/null || true
+    fi
+}
+
+trap 'forward_signal_to_python USR1' USR1
+trap 'forward_signal_to_python TERM' TERM
+trap 'forward_signal_to_python INT' INT
+
+python3 %%python_script%% %%path_to_yaml_config%% -j $SLURM_ARRAY_TASK_ID %%cw_args%% &
+CW2_PYTHON_PID=$!
+
+while true; do
+    wait "$CW2_PYTHON_PID"
+    exit_code=$?
+    if kill -0 "$CW2_PYTHON_PID" 2>/dev/null; then
+        continue
+    fi
+    exit "$exit_code"
+done
 
 # THIS WAS BUILT FROM THE DEFAULLT SBATCH TEMPLATE
